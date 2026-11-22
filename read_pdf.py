@@ -41,7 +41,7 @@ pytesseract.pytesseract.tesseract_cmd = (
 
 def bo_dau(text):
     """Bỏ dấu để tìm nhãn; không dùng bản này làm dữ liệu đầu ra."""
-    text = unicodedata.normalize("NFC", text) # Ghép chữ và dấu thành ký tự hoàn chỉnh khi có thể	A + dấu mũ → Â
+    # text = unicodedata.normalize("NFC", text) # Ghép chữ và dấu thành ký tự hoàn chỉnh khi có thể	A + dấu mũ → Â
     text = text.replace("đ", "d").replace("Đ", "D") # chữ đ ko tách đc thành d và dấu
 
     return "".join(
@@ -210,7 +210,7 @@ def extract_fields(image, lines): # line là danh sách các dòng do ocr_lines(
       # next(..., None): lấy dòng đầu tiên thỏa mãn điều kiện, nếu ko tìm đc thì trả về None
 
     if start is None:
-        return [], [], ["Không tìm thấy nhãn Lĩnh vực"]
+        return None, [], ["Không tìm thấy nhãn Lĩnh vực"]
 
     end = next(
         (
@@ -225,7 +225,7 @@ def extract_fields(image, lines): # line là danh sách các dòng do ocr_lines(
     )
 
     if end is None:
-        return [], [], ["Không tìm thấy nhãn Nhà mạng"]
+        return None, [], ["Không tìm thấy nhãn Nhà mạng"]
 
     y_start = start["bottom"]
     y_end = end["top"]
@@ -321,7 +321,7 @@ def extract_fields(image, lines): # line là danh sách các dòng do ocr_lines(
     boxes.sort(key=lambda box: box["y"])
 
     if not boxes:
-        return [], [], ["Không tìm thấy checkbox lĩnh vực"]
+        return None, [], ["Không tìm thấy checkbox lĩnh vực"]
 
     selected = []
 
@@ -389,8 +389,51 @@ def extract_fields(image, lines): # line là danh sách các dòng do ocr_lines(
     if not selected:
         warnings.append("Chưa xác định được lĩnh vực đã chọn")
 
-    return selected, boxes, warnings
+    return selected if selected else None, boxes, warnings
 
+def find_brand_pdf(folder_path):
+    """
+    Tìm PDF chứa đầy đủ các từ khóa trên cùng một trang.
+
+    Trả về:
+        {"ten_file": "...pdf", "trang": 1}
+    hoặc None nếu không tìm thấy.
+    """
+    folder_path = Path(folder_path)
+
+    if not folder_path.is_dir():
+        raise NotADirectoryError(
+            f"Folder không tồn tại: {folder_path}"
+        )
+
+    pdf_files = sorted(
+        (
+            path
+            for path in folder_path.iterdir()
+            if path.is_file()
+            and path.suffix.lower() == ".pdf"
+        ),
+        key=lambda path: path.name.lower(),
+    )
+    result_check = {}
+    for pdf_path in pdf_files:
+        result_check.clear()
+        image = pdf_to_image(pdf_path)
+        lines = ocr_lines(image)
+        full_text = "\n".join(line["text"] for line in lines)
+        company = extract_company(full_text)
+        brandname = extract_brandname(full_text)
+        fields, boxes, warnings = extract_fields(image, lines)
+        result_check.update({
+            "ten_cong_ty": company,
+            "brandname": brandname,
+            "linh_vuc": fields              
+            })
+        
+        if all(value is not None for value in result_check.values()):
+            return pdf_path
+        
+    return None
 
 def read_brand_pdf(pdf_path, page_number=1):
     image = pdf_to_image(pdf_path, page_number)
@@ -451,13 +494,132 @@ def read_brand_pdf(pdf_path, page_number=1):
         "trang": page_number,
     }
 
+def extract_BRN(text):
+    """Tìm mã số doanh nghiệp trong kết quả OCR đã tiền xử lý."""
+    text = unicodedata.normalize("NFC", text)
+    flat = re.sub(r"\s+", " ", text).strip()
+    plain = bo_dau(flat).lower()
+
+    pattern = (
+        r"\bma so doanh nghiep\s*[:：]?\s*"
+        r"(?P<brn>\d(?:[\s.-]?\d){9,12})"
+    )
+    match = re.search(pattern, plain)
+
+    if not match:
+        return None
+
+    start, end = match.span("brn")
+    brn = re.sub(r"\D", "", flat[start:end])
+    return brn if len(brn) in (10, 13) else None
+
+
+def extract_brn_from_image(image):
+    """OCR riêng vùng đầu trang và trả về mã doanh nghiệp."""
+    height = image.shape[0]
+
+    # Mã doanh nghiệp nằm ở phần đầu giấy chứng nhận. Cắt vùng này để
+    # tránh số điện thoại, vốn điều lệ và số giấy tờ ở phía dưới trang.
+    region = image[:int(height * 0.28), :]
+    gray = cv2.cvtColor(region, cv2.COLOR_RGB2GRAY)
+
+    # Chữ có màu tối, còn hoa văn nền màu vàng có mức xám cao.
+    # Ngưỡng cố định này loại được phần lớn watermark của mẫu hiện tại.
+    _, clean = cv2.threshold(
+        gray,
+        170,
+        255,
+        cv2.THRESH_BINARY,
+    )
+
+    text = pytesseract.image_to_string(
+        clean,
+        lang="vie+eng",
+        config="--psm 6",
+        timeout=60,
+    )
+
+    brn = extract_BRN(text)
+
+    if brn:
+        return brn
+
+    # Nếu OCR làm hỏng nhãn "Mã số doanh nghiệp" nhưng vẫn đọc đúng số,
+    # lấy chuỗi 10 chữ số duy nhất trong vùng đầu trang.
+    match = re.search(r"(?<!\d)\d{10}(?!\d)", text)
+    return match.group(0) if match else None
+
+def find_brn_pdf(folder_path):
+    """
+    Tìm PDF chứa đầy đủ các từ khóa trên cùng một trang.
+
+    Trả về:
+        {"ten_file": "...pdf", "trang": 1}
+    hoặc None nếu không tìm thấy.
+    """
+    folder_path = Path(folder_path)
+
+    if not folder_path.is_dir():
+        raise NotADirectoryError(
+            f"Folder không tồn tại: {folder_path}"
+        )
+
+    pdf_files = sorted(
+        (
+            path
+            for path in folder_path.iterdir()
+            if path.is_file()
+            and path.suffix.lower() == ".pdf"
+        ),
+        key=lambda path: path.name.lower(),
+    )
+    result_check = {}
+    for pdf_path in pdf_files:
+        result_check.clear()
+        image = pdf_to_image(pdf_path)
+        brn = extract_brn_from_image(image)
+        result_check.update({
+            "ma_cong_ty": brn             
+            })
+        
+        if all(value is not None for value in result_check.values()):
+            return pdf_path
+        
+    return None
+
+def read_brn_pdf(pdf_path, page_number=1):
+    image = pdf_to_image(pdf_path, page_number)
+    brn = extract_brn_from_image(image)
+
+    if not brn:
+        print("Không đọc được mã công ty")
+
+
+    return {
+        "ma_cong_ty": brn
+    }
+
 
 if __name__ == "__main__": # hàm này sẽ chạy khi file read_pdf.py đc chạy, nếu là file khác chạy thì sẽ bỏ qua
-    PDF_PATH = r"D:\Công việc MDS\Tổ AI\Flow_auto_agent\auto_duyet_brand\AIS\CV khai báo.pdf"
+    Folder_PATH = r"D:\Tổ AI_ auto\auto_flow_agent\auto_brandname\AIS"
+    PDF_PATH_brand = find_brand_pdf(Folder_PATH)
+    PDF_PATH_brn = find_brn_pdf(Folder_PATH)
 
     PAGE_NUMBER = 1
 
-    result = read_brand_pdf(PDF_PATH, PAGE_NUMBER)
+    if PDF_PATH_brand is None:
+        raise FileNotFoundError(
+            "Không tìm thấy PDF chứa thông tin brandname"
+        )
+
+    if PDF_PATH_brn is None:
+        raise FileNotFoundError(
+            "Không tìm thấy PDF chứa mã công ty"
+        )
+
+    result_brand = read_brand_pdf(PDF_PATH_brand, PAGE_NUMBER)
+    result_brn = read_brn_pdf(PDF_PATH_brn, PAGE_NUMBER)
+    result = {**result_brand, **result_brn}
 
     print(json.dumps(result, ensure_ascii=False, indent=2))
 

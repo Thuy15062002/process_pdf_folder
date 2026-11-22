@@ -1,0 +1,10 @@
+# Không đưa môi trường ảo lên Git
+.venv/
+venv/
+
+ket_qua.json
+kiem_tra_checkbox.png
+ocr_text.txt
+
+__pycache__/
+*.py[cod]
