@@ -150,9 +150,9 @@ def extract_company(text):
         # r"(?:can bo\s+)?cong nhan vien\s+"
         # r"(?P<company>cong ty\b.+?)"
         # r"\s+nhan duoc\s+tin nhan"
-        r"can bo cong nhan vien\s"
+        r"can\sbo\scong\snhan\svien\s"
         r"(?P<company>.+?)"
-        r"\snhan duoc\stin nhan"
+        r"\snhan\sduoc\stin\snhan"
     ) # chữ r ở trc dấu là để giữ nguyên dấu /
 
     match = re.search(pattern, plain)
@@ -172,9 +172,9 @@ def extract_brandname(text):
     plain = bo_dau(flat).lower()
 
     pattern = (
-        r"\bbrandname khai bao"
+        r"\bbrandname\s+(?:khai\s+bao|xin\s+cap)\s*:?\s*"
         r"(?P<brandname>.+?)"
-        r"\s+loai tin nhan:"
+        r"(?=\s+(?:loai\s+tin\s+nhan\s*:|nham\s+tao\b))"
     )
     match = re.search(pattern, plain)
 
@@ -355,7 +355,7 @@ def extract_fields(image, lines): # line là danh sách các dòng do ocr_lines(
 
         text_image = image[
             top:bottom,
-            x + w + 3:int(width * 0.7),
+            x + w + 3:int(width * 1.0),
         ]
         #image[y_bắt_đầu:y_kết_thúc, x_bắt_đầu:x_kết_thúc]; cắt ảnh
 
@@ -430,7 +430,7 @@ def find_brand_pdf(folder_path):
             "linh_vuc": fields              
             })
         
-        if all(value is not None for value in result_check.values()):
+        if sum(value is not None for value in result_check.values()) >= 2:
             return pdf_path
         
     return None
@@ -514,14 +514,37 @@ def extract_BRN(text):
     return brn if len(brn) in (10, 13) else None
 
 
-def extract_brn_from_image(image):
-    """OCR riêng vùng đầu trang và trả về mã doanh nghiệp."""
-    height = image.shape[0]
+def extract_web(text):
+    """Tìm website nằm sau nhãn Website trong văn bản OCR toàn trang."""
+    if not isinstance(text, str) or not text.strip():
+        return None
 
-    # Mã doanh nghiệp nằm ở phần đầu giấy chứng nhận. Cắt vùng này để
-    # tránh số điện thoại, vốn điều lệ và số giấy tờ ở phía dưới trang.
-    region = image[:int(height * 0.28), :]
-    gray = cv2.cvtColor(region, cv2.COLOR_RGB2GRAY)
+    text = unicodedata.normalize("NFKC", text)
+    flat = re.sub(r"\s+", " ", text).strip()
+
+    domain_label = r"[a-z0-9](?:[a-z0-9-]{0,61}[a-z0-9])?"
+    pattern = re.compile(
+        r"\b(?:web\s*site|webs[i1l]te|trang\s*web)\b"
+        r"\s*[:\-]?\s*"
+        r"(?P<web>"
+        r"(?:https?\s*:\s*/\s*/\s*)?"
+        r"(?:www\s*\.\s*)?"
+        rf"(?:{domain_label}\s*\.\s*)+[a-z]{{2,63}}"
+        r")",
+        re.IGNORECASE,
+    )
+    match = pattern.search(flat)
+
+    if not match:
+        return None
+
+    website = re.sub(r"\s+", "", match.group("web"))
+    return website.rstrip(".,;:!?").lower()
+
+
+def extract_brn_web_from_image(image):
+    """OCR  trả về mã doanh nghiệp và tên miền."""
+    gray = cv2.cvtColor(image, cv2.COLOR_RGB2GRAY)
 
     # Chữ có màu tối, còn hoa văn nền màu vàng có mức xám cao.
     # Ngưỡng cố định này loại được phần lớn watermark của mẫu hiện tại.
@@ -540,14 +563,9 @@ def extract_brn_from_image(image):
     )
 
     brn = extract_BRN(text)
+    web = extract_web(text)
+    return brn, web
 
-    if brn:
-        return brn
-
-    # Nếu OCR làm hỏng nhãn "Mã số doanh nghiệp" nhưng vẫn đọc đúng số,
-    # lấy chuỗi 10 chữ số duy nhất trong vùng đầu trang.
-    match = re.search(r"(?<!\d)\d{10}(?!\d)", text)
-    return match.group(0) if match else None
 
 def find_brn_pdf(folder_path):
     """
@@ -577,26 +595,31 @@ def find_brn_pdf(folder_path):
     for pdf_path in pdf_files:
         result_check.clear()
         image = pdf_to_image(pdf_path)
-        brn = extract_brn_from_image(image)
+        brn, web = extract_brn_web_from_image(image)
         result_check.update({
-            "ma_cong_ty": brn             
+            "ma_cong_ty": brn,
+            "ten_mien": web
             })
         
-        if all(value is not None for value in result_check.values()):
+        if brn is not None:
             return pdf_path
         
     return None
 
 def read_brn_pdf(pdf_path, page_number=1):
     image = pdf_to_image(pdf_path, page_number)
-    brn = extract_brn_from_image(image)
+    brn, web = extract_brn_web_from_image(image)
 
     if not brn:
         print("Không đọc được mã công ty")
 
+    if not web:
+        print("Không đọc được tên miền")
+
 
     return {
-        "ma_cong_ty": brn
+        "ma_cong_ty": brn,
+        "ten_mien": web
     }
 
 

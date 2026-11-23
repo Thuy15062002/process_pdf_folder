@@ -1,0 +1,16 @@
+{
+  "manifest_version": 3,
+  "name": "Business ID Input Fill",
+  "version": "1.2.0",
+  "description": "Dien ma so doanh nghiep tu URL fragment; khong gui form.",
+  "content_scripts": [
+    {
+      "matches": [
+        "https://dangkykinhdoanh.gov.vn/*",
+        "https://www.dangkykinhdoanh.gov.vn/*"
+      ],
+      "js": ["content.js"],
+      "run_at": "document_idle"
+    }
+  ]
+}
